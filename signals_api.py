@@ -127,5 +127,5 @@ def ping():
 
 if __name__ == "__main__":
     threading.Thread(target=scan_loop, daemon=True).start()
-    print("🚀 Signals API running on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000)
+    print("🚀 Signals API running on http://0.0.0.0:5001")
+    app.run(host="0.0.0.0", port=5001)
