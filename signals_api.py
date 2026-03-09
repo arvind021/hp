@@ -59,7 +59,7 @@ def calc_bollinger(closes, period=20):
 def get_candles(symbol):
     try:
         import yfinance as yf
-        df = yf.Ticker(YF_MAP[symbol]).history(period="2d", interval="5m")
+        df = yf.Ticker(YF_MAP[symbol]).history(period="1d", interval="2m")
         if df.empty: return None
         return list(df["Close"].dropna())
     except Exception as e:
@@ -147,7 +147,7 @@ def check_results():
         now = time.time()
         still_pending = []
         for entry in pending_results:
-            if now - entry["timestamp"] >= 300:
+            if now - entry["timestamp"] >= 120:  # 2 min baad check
                 current = get_current_price(entry["pair"])
                 if current is None:
                     still_pending.append(entry); continue
@@ -185,14 +185,12 @@ def scan_loop():
 
             print(f"\n[{stats['last_scan']}] Scanning all {len(PAIRS)} pairs...")
 
-            # FIX 1 — Sab pairs scan karo, best score wala signal lo
-            best_signal = None
-            best_score  = 0
-
+            # Sab valid signals dikhao
+            found_any = False
             for pair in PAIRS:
                 direction, score, strength = generate_signal(pair)
-                if direction and score > best_score:
-                    best_signal = {
+                if direction:
+                    sig = {
                         "time":      ist.strftime("%I:%M %p"),
                         "pair":      pair,
                         "direction": direction,
@@ -201,20 +199,19 @@ def scan_loop():
                         "price":     live_prices.get(pair, 0),
                         "result":    "⏳ Pending",
                     }
-                    best_score = score
+                    signal_history.appendleft(sig)
+                    stats["total"] += 1
+                    pending_results.append({
+                        "pair":      pair,
+                        "direction": direction,
+                        "price":     live_prices.get(pair, 0),
+                        "time":      ist.strftime("%I:%M %p"),
+                        "timestamp": time.time(),
+                    })
+                    print(f"✅ SIGNAL: {pair} {direction} {strength} (score={score})")
+                    found_any = True
 
-            if best_signal:
-                signal_history.appendleft(best_signal)
-                stats["total"] += 1
-                pending_results.append({
-                    "pair":      best_signal["pair"],
-                    "direction": best_signal["direction"],
-                    "price":     best_signal["price"],
-                    "time":      best_signal["time"],
-                    "timestamp": time.time(),
-                })
-                print(f"✅ BEST SIGNAL: {best_signal['pair']} {best_signal['direction']} {best_signal['strength']} (score={best_score})")
-            else:
+            if not found_any:
                 print("⚪ No signal this scan")
 
         except Exception as e:
