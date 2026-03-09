@@ -19,9 +19,6 @@ live_prices    = {p: 0.0 for p in PAIRS}
 winrate        = defaultdict(lambda: {"win": 0, "loss": 0})
 stats          = {"total": 0, "users": 0, "last_scan": "Never"}
 
-# ============================================================
-#  INDICATORS
-# ============================================================
 def calc_ema(closes, period):
     if len(closes) < period: return closes[-1]
     k = 2 / (period + 1)
@@ -81,8 +78,11 @@ def is_good_session():
     return (7 <= hour < 16) or (12 <= hour < 21)
 
 # ============================================================
-#  SIGNAL LOGIC — Voting System (3/4 wins)
-#  Koi bhi 3 indicators agree karein = Signal!
+#  SIGNAL LOGIC
+#  4/4 = STRONG 🔥
+#  3/4 = GOOD ✅
+#  2/4 = WEAK ⚡ (but still signal)
+#  Condition: MACD must always agree
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
@@ -95,41 +95,40 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    print(f"  RSI={rsi:.1f} MACD_line={ml:.6f} MACD_sig={ms:.6f}")
-
     # CALL votes
-    call_votes = 0
-    if rsi < 45:                          call_votes += 1  # RSI oversold
-    if ml > ms:                           call_votes += 1  # MACD bullish
-    if price > ema9 > ema21:              call_votes += 1  # EMA bullish
-    if bl is not None and price < bl:     call_votes += 1  # BB lower
+    c_rsi  = rsi < 50
+    c_macd = ml > ms
+    c_ema  = price > ema9 > ema21
+    c_bb   = bl is not None and price < bl
+    call_votes = sum([c_rsi, c_macd, c_ema, c_bb])
 
     # PUT votes
-    put_votes = 0
-    if rsi > 55:                          put_votes += 1   # RSI overbought
-    if ml < ms:                           put_votes += 1   # MACD bearish
-    if price < ema9 < ema21:              put_votes += 1   # EMA bearish
-    if bu is not None and price > bu:     put_votes += 1   # BB upper
+    p_rsi  = rsi > 50
+    p_macd = ml < ms
+    p_ema  = price < ema9 < ema21
+    p_bb   = bu is not None and price > bu
+    put_votes = sum([p_rsi, p_macd, p_ema, p_bb])
 
-    print(f"  CALL votes: {call_votes}/4 | PUT votes: {put_votes}/4")
+    print(f"  RSI={rsi:.1f} | CALL={call_votes}/4 PUT={put_votes}/4")
 
-    # 4/4 = STRONG
-    if call_votes == 4:
-        return "CALL", 10, "STRONG 🔥"
-    if put_votes == 4:
-        return "PUT",  10, "STRONG 🔥"
+    # MACD must agree — prevents false signals
+    if call_votes >= 3 and c_macd:
+        strength = "STRONG 🔥" if call_votes == 4 else "GOOD ✅"
+        return "CALL", call_votes * 2 + 2, strength
 
-    # 3/4 = GOOD
-    if call_votes == 3 and call_votes > put_votes:
-        return "CALL", 7, "GOOD ✅"
-    if put_votes == 3 and put_votes > call_votes:
-        return "PUT",  7, "GOOD ✅"
+    if put_votes >= 3 and p_macd:
+        strength = "STRONG 🔥" if put_votes == 4 else "GOOD ✅"
+        return "PUT", put_votes * 2 + 2, strength
+
+    # 2 votes — MACD + any 1 other
+    if call_votes == 2 and c_macd and call_votes > put_votes:
+        return "CALL", 5, "WEAK ⚡"
+
+    if put_votes == 2 and p_macd and put_votes > call_votes:
+        return "PUT", 5, "WEAK ⚡"
 
     return None, 0, ""
 
-# ============================================================
-#  SCAN LOOP
-# ============================================================
 def scan_loop():
     while True:
         try:
@@ -176,11 +175,11 @@ def get_signals():
 
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok", "api": "yfinance"})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Voting System")
-    print("📊 RSI + MACD + EMA + BB (3/4 = Signal)")
+    print("🚀 Quotex Signals API — Smart Voting")
+    print("🔥 STRONG: 4/4 | ✅ GOOD: 3/4 | ⚡ WEAK: 2/4")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
     print("⏱  Scan: Every 2 minutes")
     threading.Thread(target=scan_loop, daemon=True).start()
