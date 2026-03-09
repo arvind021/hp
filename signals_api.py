@@ -130,12 +130,6 @@ def generate_signal(symbol):
         s = "STRONG 🔥" if put_votes == 4 else "GOOD ✅"
         return "PUT", put_votes*2+2, s
 
-    # WEAK — 2/4 + MACD + RSI range zaroori
-    if call_votes == 2 and c_macd and c_rsi and call_votes > put_votes:
-        return "CALL", 5, "WEAK ⚡"
-    if put_votes == 2 and p_macd and p_rsi and put_votes > call_votes:
-        return "PUT", 5, "WEAK ⚡"
-
     return None, 0, ""
 
 # ============================================================
