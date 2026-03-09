@@ -122,14 +122,19 @@ def generate_signal(symbol):
 
     print(f"  {symbol}: RSI={rsi:.1f} | CALL={call_votes}/4 PUT={put_votes}/4")
 
-    # Minimum 3/4 zaroori + MACD agree
+    # 4/4 = STRONG, 3/4 = GOOD, 2/4 = WEAK
     if call_votes >= 3 and c_macd and call_votes > put_votes:
         s = "STRONG 🔥" if call_votes == 4 else "GOOD ✅"
         return "CALL", call_votes*2+2, s
-
     if put_votes >= 3 and p_macd and put_votes > call_votes:
         s = "STRONG 🔥" if put_votes == 4 else "GOOD ✅"
         return "PUT", put_votes*2+2, s
+
+    # WEAK — 2/4 + MACD zaroori
+    if call_votes == 2 and c_macd and call_votes > put_votes:
+        return "CALL", 5, "WEAK ⚡"
+    if put_votes == 2 and p_macd and put_votes > call_votes:
+        return "PUT", 5, "WEAK ⚡"
 
     return None, 0, ""
 
