@@ -7,7 +7,7 @@ import pytz, requests, threading, time
 app = Flask(__name__)
 CORS(app)
 
-TD_API_KEY = "6c0dd041654a47b692d3964cf86ecfec"
+AV_API_KEY = "1AVHXWOWZTYWTHJ7"  # Alpha Vantage — free unlimited
 PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "EUR/GBP", "USD/CHF"]
 
 signal_history = deque(maxlen=20)
@@ -52,30 +52,55 @@ def calc_bollinger(closes, period=20):
     std = (sum((x-m)**2 for x in r)/period)**0.5
     return m + 2*std, m, m - 2*std
 
-def get_candles(symbol, interval="5min", size=60):
+# ============================================================
+#  ALPHA VANTAGE — Candles fetch
+# ============================================================
+def get_candles(symbol):
     clean = symbol.replace("/", "")
-    url = f"https://api.twelvedata.com/time_series?symbol={clean}&interval={interval}&outputsize={size}&apikey={TD_API_KEY}"
+    from_sym = clean[:3]
+    to_sym   = clean[3:]
+    url = (
+        f"https://www.alphavantage.co/query"
+        f"?function=FX_INTRADAY"
+        f"&from_symbol={from_sym}"
+        f"&to_symbol={to_sym}"
+        f"&interval=5min"
+        f"&outputsize=compact"
+        f"&apikey={AV_API_KEY}"
+    )
     try:
         r = requests.get(url, timeout=15)
         d = r.json()
-        if d.get("status") != "ok":
-            print(f"  ⚠️ API error for {symbol}: {d.get('message','unknown')}")
+        key = "Time Series FX (5min)"
+        if key not in d:
+            print(f"  ⚠️ {symbol}: {d.get('Note') or d.get('Information') or 'No data'}")
             return None
-        candles = [float(c["close"]) for c in reversed(d["values"])]
-        print(f"  📊 {symbol}: {len(candles)} candles fetched")
-        return candles
+        candles = sorted(d[key].items())
+        closes  = [float(v["4. close"]) for _, v in candles]
+        print(f"  📊 {symbol}: {len(closes)} candles")
+        return closes
     except Exception as e:
-        print(f"  ❌ Fetch error {symbol}: {e}")
+        print(f"  ❌ {symbol}: {e}")
         return None
 
 def fetch_prices():
     for pair in PAIRS:
-        clean = pair.replace("/", "")
-        url = f"https://api.twelvedata.com/price?symbol={clean}&apikey={TD_API_KEY}"
+        clean    = pair.replace("/", "")
+        from_sym = clean[:3]
+        to_sym   = clean[3:]
+        url = (
+            f"https://www.alphavantage.co/query"
+            f"?function=CURRENCY_EXCHANGE_RATE"
+            f"&from_currency={from_sym}"
+            f"&to_currency={to_sym}"
+            f"&apikey={AV_API_KEY}"
+        )
         try:
             r = requests.get(url, timeout=5)
-            live_prices[pair] = float(r.json().get("price", 0))
+            rate = r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
+            live_prices[pair] = float(rate)
         except: pass
+        time.sleep(1)  # Rate limit respect
 
 def is_good_session():
     hour = datetime.now(pytz.timezone("UTC")).hour
@@ -83,11 +108,11 @@ def is_good_session():
 
 # ============================================================
 #  SIGNAL LOGIC
+#  RSI + MACD (core) + EMA ya BB (confirm)
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
     if not closes or len(closes) < 30:
-        print(f"  ⚠️ {symbol}: Not enough candles")
         return None, 0, ""
 
     price  = closes[-1]
@@ -97,7 +122,7 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    print(f"  📈 RSI={rsi:.1f} | MACD={ml:.6f} Sig={ms:.6f} | EMA9={ema9:.5f} EMA21={ema21:.5f} | Price={price:.5f}")
+    print(f"  RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} EMA9={ema9:.5f} EMA21={ema21:.5f}")
 
     c_rsi  = rsi < 50
     c_macd = ml > ms
@@ -116,30 +141,33 @@ def generate_signal(symbol):
     if c_rsi and c_macd and c_ema and c_bb:
         return "CALL", 10, "STRONG 🔥"
     if p_rsi and p_macd and p_ema and p_bb:
-        return "PUT", 10, "STRONG 🔥"
+        return "PUT",  10, "STRONG 🔥"
 
     # GOOD — RSI + MACD + (EMA or BB)
     if c_rsi and c_macd and (c_ema or c_bb):
         return "CALL", 7, "GOOD ✅"
     if p_rsi and p_macd and (p_ema or p_bb):
-        return "PUT", 7, "GOOD ✅"
+        return "PUT",  7, "GOOD ✅"
 
     return None, 0, ""
 
+# ============================================================
+#  SCAN LOOP — Har 2 min (AV rate limit respect)
+# ============================================================
 def scan_loop():
     while True:
         try:
-            fetch_prices()
             ist = datetime.now(pytz.timezone("Asia/Kolkata"))
             stats["last_scan"] = ist.strftime("%I:%M %p")
 
             if not is_good_session():
                 print(f"[{stats['last_scan']}] Outside session — skipped")
-                time.sleep(60); continue
+                time.sleep(120); continue
 
             print(f"\n[{stats['last_scan']}] Scanning {len(PAIRS)} pairs...")
             for pair in PAIRS:
                 direction, score, strength = generate_signal(pair)
+                time.sleep(12)  # AV free = 5 req/min
                 if direction:
                     signal_history.appendleft({
                         "time":      ist.strftime("%I:%M %p"),
@@ -155,10 +183,13 @@ def scan_loop():
                 else:
                     print(f"⚪ {pair}: No signal")
 
+            # Fetch prices after scan
+            threading.Thread(target=fetch_prices, daemon=True).start()
+
         except Exception as e:
             print(f"Scan error: {e}")
 
-        time.sleep(60)
+        time.sleep(120)  # 2 min wait
 
 @app.route("/signals")
 def get_signals():
@@ -171,12 +202,13 @@ def get_signals():
 
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "api": "AlphaVantage"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Debug Mode")
+    print("🚀 Quotex Signals API — Alpha Vantage")
+    print("📊 RSI + MACD + EMA/BB")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
-    print("⏱  Scan: Every 1 minute")
+    print("⏱  Scan: Every 2 minutes")
     threading.Thread(target=scan_loop, daemon=True).start()
     print("🔗 http://0.0.0.0:5001")
     app.run(host="0.0.0.0", port=5001)
