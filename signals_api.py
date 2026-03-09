@@ -16,7 +16,7 @@ winrate        = defaultdict(lambda: {"win": 0, "loss": 0})
 stats          = {"total": 0, "users": 0, "last_scan": "Never"}
 
 # ============================================================
-#  INDICATORS — Sahi calculation
+#  INDICATORS
 # ============================================================
 def calc_ema(closes, period):
     if len(closes) < period: return closes[-1]
@@ -36,16 +36,13 @@ def calc_rsi(closes, period=14):
     return 100 - (100 / (1 + ag/al))
 
 def calc_macd(closes):
-    """Sahi MACD — EMA12, EMA26, Signal=EMA9 of MACD"""
     if len(closes) < 35: return 0, 0
-    # MACD line = EMA12 - EMA26
     macd_values = []
     for i in range(26, len(closes)):
         e12 = calc_ema(closes[:i+1], 12)
         e26 = calc_ema(closes[:i+1], 26)
         macd_values.append(e12 - e26)
     if len(macd_values) < 9: return 0, 0
-    # Signal line = EMA9 of MACD
     signal = calc_ema(macd_values, 9)
     return macd_values[-1], signal
 
@@ -55,14 +52,21 @@ def calc_bollinger(closes, period=20):
     std = (sum((x-m)**2 for x in r)/period)**0.5
     return m + 2*std, m, m - 2*std
 
-def get_candles(symbol, interval="5min", size=80):
+def get_candles(symbol, interval="5min", size=60):
     clean = symbol.replace("/", "")
     url = f"https://api.twelvedata.com/time_series?symbol={clean}&interval={interval}&outputsize={size}&apikey={TD_API_KEY}"
     try:
-        r = requests.get(url, timeout=10); d = r.json()
-        if d.get("status") != "ok": return None
-        return [float(c["close"]) for c in reversed(d["values"])]
-    except: return None
+        r = requests.get(url, timeout=15)
+        d = r.json()
+        if d.get("status") != "ok":
+            print(f"  ⚠️ API error for {symbol}: {d.get('message','unknown')}")
+            return None
+        candles = [float(c["close"]) for c in reversed(d["values"])]
+        print(f"  📊 {symbol}: {len(candles)} candles fetched")
+        return candles
+    except Exception as e:
+        print(f"  ❌ Fetch error {symbol}: {e}")
+        return None
 
 def fetch_prices():
     for pair in PAIRS:
@@ -79,11 +83,12 @@ def is_good_session():
 
 # ============================================================
 #  SIGNAL LOGIC
-#  RSI + MACD (core) + EMA ya BB (confirm)
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
-    if not closes or len(closes) < 35: return None, 0, ""
+    if not closes or len(closes) < 30:
+        print(f"  ⚠️ {symbol}: Not enough candles")
+        return None, 0, ""
 
     price  = closes[-1]
     rsi    = calc_rsi(closes)
@@ -92,28 +97,28 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    # Debug print
-    print(f"  {symbol}: RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} EMA9={ema9:.5f} EMA21={ema21:.5f}")
+    print(f"  📈 RSI={rsi:.1f} | MACD={ml:.6f} Sig={ms:.6f} | EMA9={ema9:.5f} EMA21={ema21:.5f} | Price={price:.5f}")
 
-    # CALL conditions
     c_rsi  = rsi < 50
     c_macd = ml > ms
     c_ema  = price > ema9 > ema21
     c_bb   = bl is not None and price < bl
 
-    # PUT conditions
     p_rsi  = rsi > 50
     p_macd = ml < ms
     p_ema  = price < ema9 < ema21
     p_bb   = bu is not None and price > bu
 
-    # STRONG — sab 4
+    print(f"  CALL: RSI={c_rsi} MACD={c_macd} EMA={c_ema} BB={c_bb}")
+    print(f"  PUT:  RSI={p_rsi} MACD={p_macd} EMA={p_ema} BB={p_bb}")
+
+    # STRONG — 4/4
     if c_rsi and c_macd and c_ema and c_bb:
         return "CALL", 10, "STRONG 🔥"
     if p_rsi and p_macd and p_ema and p_bb:
         return "PUT", 10, "STRONG 🔥"
 
-    # GOOD — RSI + MACD + (EMA ya BB)
+    # GOOD — RSI + MACD + (EMA or BB)
     if c_rsi and c_macd and (c_ema or c_bb):
         return "CALL", 7, "GOOD ✅"
     if p_rsi and p_macd and (p_ema or p_bb):
@@ -132,7 +137,7 @@ def scan_loop():
                 print(f"[{stats['last_scan']}] Outside session — skipped")
                 time.sleep(60); continue
 
-            print(f"[{stats['last_scan']}] Scanning {len(PAIRS)} pairs...")
+            print(f"\n[{stats['last_scan']}] Scanning {len(PAIRS)} pairs...")
             for pair in PAIRS:
                 direction, score, strength = generate_signal(pair)
                 if direction:
@@ -145,7 +150,7 @@ def scan_loop():
                         "price":     live_prices.get(pair, 0),
                     })
                     stats["total"] += 1
-                    print(f"✅ {pair} {direction} {strength}")
+                    print(f"✅ SIGNAL: {pair} {direction} {strength}")
                     break
                 else:
                     print(f"⚪ {pair}: No signal")
@@ -169,8 +174,7 @@ def ping():
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Fixed MACD")
-    print("📊 RSI + MACD(fixed) + EMA/BB")
+    print("🚀 Quotex Signals API — Debug Mode")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
     print("⏱  Scan: Every 1 minute")
     threading.Thread(target=scan_loop, daemon=True).start()
