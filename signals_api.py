@@ -17,9 +17,12 @@ YF_MAP = {
 signal_history  = deque(maxlen=20)
 live_prices     = {p: 0.0 for p in PAIRS}
 winrate         = defaultdict(lambda: {"win": 0, "loss": 0})
-pending_results = []  # Signals waiting for result check
+pending_results = []
 stats           = {"total": 0, "wins": 0, "losses": 0, "last_scan": "Never"}
 
+# ============================================================
+#  INDICATORS
+# ============================================================
 def calc_ema(closes, period):
     if len(closes) < period: return closes[-1]
     k = 2 / (period + 1)
@@ -59,7 +62,9 @@ def get_candles(symbol):
         df = yf.Ticker(YF_MAP[symbol]).history(period="2d", interval="5m")
         if df.empty: return None
         return list(df["Close"].dropna())
-    except: return None
+    except Exception as e:
+        print(f"  ❌ {symbol}: {e}")
+        return None
 
 def get_current_price(symbol):
     try:
@@ -70,7 +75,8 @@ def get_current_price(symbol):
     except: pass
     return None
 
-def fetch_prices():
+def fetch_all_prices():
+    """FIX 3 — Sab pairs ke fresh prices fetch karo"""
     try:
         import yfinance as yf
         for pair in PAIRS:
@@ -83,6 +89,9 @@ def is_good_session():
     hour = datetime.now(pytz.timezone("UTC")).hour
     return (7 <= hour < 16) or (12 <= hour < 21)
 
+# ============================================================
+#  SIGNAL LOGIC — FIX 2: RSI range sahi kiya
+# ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
     if not closes or len(closes) < 30: return None, 0, ""
@@ -94,81 +103,74 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    c_rsi  = rsi < 50;  c_macd = ml > ms
+    # FIX 2 — RSI strict ranges
+    # CALL: RSI 30-50 (oversold zone)
+    # PUT:  RSI 50-70 (overbought zone)
+    # RSI >70 ya <30 = skip (extreme = reversal possible but unreliable)
+    c_rsi  = 30 < rsi < 50          # CALL zone
+    c_macd = ml > ms
     c_ema  = price > ema9 > ema21
     c_bb   = bl is not None and price < bl
-    call_votes = sum([c_rsi, c_macd, c_ema, c_bb])
 
-    p_rsi  = rsi > 50;  p_macd = ml < ms
+    p_rsi  = 50 < rsi < 70          # PUT zone
+    p_macd = ml < ms
     p_ema  = price < ema9 < ema21
     p_bb   = bu is not None and price > bu
-    put_votes = sum([p_rsi, p_macd, p_ema, p_bb])
 
-    print(f"  RSI={rsi:.1f} | CALL={call_votes}/4 PUT={put_votes}/4")
+    call_votes = sum([c_rsi, c_macd, c_ema, c_bb])
+    put_votes  = sum([p_rsi, p_macd, p_ema, p_bb])
 
-    if call_votes >= 3 and c_macd:
+    print(f"  {symbol}: RSI={rsi:.1f} | CALL={call_votes}/4 PUT={put_votes}/4")
+
+    # Minimum 3/4 zaroori + MACD agree
+    if call_votes >= 3 and c_macd and call_votes > put_votes:
         s = "STRONG 🔥" if call_votes == 4 else "GOOD ✅"
         return "CALL", call_votes*2+2, s
-    if put_votes >= 3 and p_macd:
+
+    if put_votes >= 3 and p_macd and put_votes > call_votes:
         s = "STRONG 🔥" if put_votes == 4 else "GOOD ✅"
         return "PUT", put_votes*2+2, s
-    if call_votes == 2 and c_macd and call_votes > put_votes:
-        return "CALL", 5, "WEAK ⚡"
-    if put_votes == 2 and p_macd and put_votes > call_votes:
-        return "PUT", 5, "WEAK ⚡"
 
     return None, 0, ""
 
 # ============================================================
-#  WIN/LOSS AUTO CHECKER — 5 min baad result check
+#  WIN/LOSS CHECKER
 # ============================================================
 def check_results():
     while True:
-        time.sleep(30)  # Check every 30 sec
+        time.sleep(30)
         now = time.time()
         still_pending = []
         for entry in pending_results:
-            elapsed = now - entry["timestamp"]
-            if elapsed >= 300:  # 5 min baad check
+            if now - entry["timestamp"] >= 300:
                 current = get_current_price(entry["pair"])
                 if current is None:
                     still_pending.append(entry); continue
-
-                entry_price = entry["price"]
-                direction   = entry["direction"]
-                won = (direction == "CALL" and current > entry_price) or \
-                      (direction == "PUT"  and current < entry_price)
-
+                won = (entry["direction"] == "CALL" and current > entry["price"]) or \
+                      (entry["direction"] == "PUT"  and current < entry["price"])
                 result = "WIN 🏆" if won else "LOSS ❌"
-                print(f"📊 Result: {entry['pair']} {direction} → {result} (entry={entry_price:.5f} now={current:.5f})")
-
-                # Update winrate
+                print(f"📊 Result: {entry['pair']} {entry['direction']} → {result}")
                 if won:
-                    winrate[entry["pair"]]["win"] += 1
-                    stats["wins"] += 1
+                    winrate[entry["pair"]]["win"] += 1; stats["wins"] += 1
                 else:
-                    winrate[entry["pair"]]["loss"] += 1
-                    stats["losses"] += 1
-
-                # Update signal history result
+                    winrate[entry["pair"]]["loss"] += 1; stats["losses"] += 1
                 for sig in signal_history:
-                    if (sig["pair"] == entry["pair"] and
-                        sig["time"] == entry["time"] and
-                        sig.get("result") == "⏳ Pending"):
-                        sig["result"] = "✅ WIN" if won else "❌ LOSS"
-                        break
+                    if sig["pair"] == entry["pair"] and sig["time"] == entry["time"]:
+                        sig["result"] = "✅ WIN" if won else "❌ LOSS"; break
             else:
                 still_pending.append(entry)
-
         pending_results.clear()
         pending_results.extend(still_pending)
 
 # ============================================================
-#  SCAN LOOP
+#  SCAN LOOP — FIX 1: Sab pairs scan karo, best signal lo
 # ============================================================
 def scan_loop():
     while True:
         try:
+            # FIX 3 — Pehle fresh prices fetch karo
+            fetch_all_prices()
+
             ist = datetime.now(pytz.timezone("Asia/Kolkata"))
             stats["last_scan"] = ist.strftime("%I:%M %p")
 
@@ -176,38 +178,39 @@ def scan_loop():
                 print(f"[{stats['last_scan']}] Outside session — skipped")
                 time.sleep(120); continue
 
-            print(f"\n[{stats['last_scan']}] Scanning {len(PAIRS)} pairs...")
+            print(f"\n[{stats['last_scan']}] Scanning all {len(PAIRS)} pairs...")
+
+            # FIX 1 — Sab pairs scan karo, best score wala signal lo
+            best_signal = None
+            best_score  = 0
+
             for pair in PAIRS:
                 direction, score, strength = generate_signal(pair)
-                if direction:
-                    price = live_prices.get(pair, 0) or get_current_price(pair) or 0
-                    sig = {
+                if direction and score > best_score:
+                    best_signal = {
                         "time":      ist.strftime("%I:%M %p"),
                         "pair":      pair,
                         "direction": direction,
                         "score":     score,
                         "strength":  strength,
-                        "price":     price,
+                        "price":     live_prices.get(pair, 0),
                         "result":    "⏳ Pending",
                     }
-                    signal_history.appendleft(sig)
-                    stats["total"] += 1
+                    best_score = score
 
-                    # Add to pending for result check
-                    pending_results.append({
-                        "pair":      pair,
-                        "direction": direction,
-                        "price":     price,
-                        "time":      ist.strftime("%I:%M %p"),
-                        "timestamp": time.time(),
-                    })
-
-                    print(f"✅ SIGNAL: {pair} {direction} {strength}")
-                    break
-                else:
-                    print(f"⚪ {pair}: No signal")
-
-            threading.Thread(target=fetch_prices, daemon=True).start()
+            if best_signal:
+                signal_history.appendleft(best_signal)
+                stats["total"] += 1
+                pending_results.append({
+                    "pair":      best_signal["pair"],
+                    "direction": best_signal["direction"],
+                    "price":     best_signal["price"],
+                    "time":      best_signal["time"],
+                    "timestamp": time.time(),
+                })
+                print(f"✅ BEST SIGNAL: {best_signal['pair']} {best_signal['direction']} {best_signal['strength']} (score={best_score})")
+            else:
+                print("⚪ No signal this scan")
 
         except Exception as e:
             print(f"Scan error: {e}")
@@ -230,11 +233,13 @@ def ping():
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — With Win/Loss Tracker")
-    print("📊 RSI + MACD + EMA + BB")
+    print("🚀 Quotex Signals API — 3 Bugs Fixed!")
+    print("✅ FIX 1: Sab pairs scan, best signal")
+    print("✅ FIX 2: RSI range 30-50 / 50-70")
+    print("✅ FIX 3: Fresh prices har scan")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
-    print("⏱  Scan: Every 2 min | Result check: After 5 min")
-    threading.Thread(target=scan_loop,    daemon=True).start()
+    print("⏱  Scan: Every 2 min | Min: 3/4 votes")
+    threading.Thread(target=scan_loop,     daemon=True).start()
     threading.Thread(target=check_results, daemon=True).start()
     print("🔗 http://0.0.0.0:5001")
     app.run(host="0.0.0.0", port=5001)
