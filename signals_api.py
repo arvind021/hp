@@ -2,13 +2,22 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from collections import deque, defaultdict
 from datetime import datetime
-import pytz, requests, threading, time
+import pytz, threading, time
 
 app = Flask(__name__)
 CORS(app)
 
-AV_API_KEY = "1AVHXWOWZTYWTHJ7"  # Alpha Vantage — free unlimited
 PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "EUR/GBP", "USD/CHF"]
+
+# Yahoo Finance format
+YF_MAP = {
+    "EUR/USD": "EURUSD=X",
+    "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X",
+    "AUD/USD": "AUDUSD=X",
+    "EUR/GBP": "EURGBP=X",
+    "USD/CHF": "USDCHF=X",
+}
 
 signal_history = deque(maxlen=20)
 live_prices    = {p: 0.0 for p in PAIRS}
@@ -43,8 +52,7 @@ def calc_macd(closes):
         e26 = calc_ema(closes[:i+1], 26)
         macd_values.append(e12 - e26)
     if len(macd_values) < 9: return 0, 0
-    signal = calc_ema(macd_values, 9)
-    return macd_values[-1], signal
+    return macd_values[-1], calc_ema(macd_values, 9)
 
 def calc_bollinger(closes, period=20):
     if len(closes) < period: return None, None, None
@@ -53,30 +61,17 @@ def calc_bollinger(closes, period=20):
     return m + 2*std, m, m - 2*std
 
 # ============================================================
-#  ALPHA VANTAGE — Candles fetch
+#  YAHOO FINANCE — Free, No API Key!
 # ============================================================
 def get_candles(symbol):
-    clean = symbol.replace("/", "")
-    from_sym = clean[:3]
-    to_sym   = clean[3:]
-    url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=FX_INTRADAY"
-        f"&from_symbol={from_sym}"
-        f"&to_symbol={to_sym}"
-        f"&interval=5min"
-        f"&outputsize=compact"
-        f"&apikey={AV_API_KEY}"
-    )
     try:
-        r = requests.get(url, timeout=15)
-        d = r.json()
-        key = "Time Series FX (5min)"
-        if key not in d:
-            print(f"  ⚠️ {symbol}: {d.get('Note') or d.get('Information') or 'No data'}")
+        import yfinance as yf
+        ticker = yf.Ticker(YF_MAP[symbol])
+        df = ticker.history(period="2d", interval="5m")
+        if df.empty:
+            print(f"  ⚠️ {symbol}: No data from Yahoo")
             return None
-        candles = sorted(d[key].items())
-        closes  = [float(v["4. close"]) for _, v in candles]
+        closes = list(df["Close"].dropna())
         print(f"  📊 {symbol}: {len(closes)} candles")
         return closes
     except Exception as e:
@@ -84,23 +79,14 @@ def get_candles(symbol):
         return None
 
 def fetch_prices():
-    for pair in PAIRS:
-        clean    = pair.replace("/", "")
-        from_sym = clean[:3]
-        to_sym   = clean[3:]
-        url = (
-            f"https://www.alphavantage.co/query"
-            f"?function=CURRENCY_EXCHANGE_RATE"
-            f"&from_currency={from_sym}"
-            f"&to_currency={to_sym}"
-            f"&apikey={AV_API_KEY}"
-        )
-        try:
-            r = requests.get(url, timeout=5)
-            rate = r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
-            live_prices[pair] = float(rate)
-        except: pass
-        time.sleep(1)  # Rate limit respect
+    try:
+        import yfinance as yf
+        for pair in PAIRS:
+            ticker = yf.Ticker(YF_MAP[pair])
+            df = ticker.history(period="1d", interval="1m")
+            if not df.empty:
+                live_prices[pair] = float(df["Close"].iloc[-1])
+    except: pass
 
 def is_good_session():
     hour = datetime.now(pytz.timezone("UTC")).hour
@@ -108,7 +94,6 @@ def is_good_session():
 
 # ============================================================
 #  SIGNAL LOGIC
-#  RSI + MACD (core) + EMA ya BB (confirm)
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
@@ -122,7 +107,7 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    print(f"  RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} EMA9={ema9:.5f} EMA21={ema21:.5f}")
+    print(f"  RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} Price={price:.5f}")
 
     c_rsi  = rsi < 50
     c_macd = ml > ms
@@ -137,13 +122,11 @@ def generate_signal(symbol):
     print(f"  CALL: RSI={c_rsi} MACD={c_macd} EMA={c_ema} BB={c_bb}")
     print(f"  PUT:  RSI={p_rsi} MACD={p_macd} EMA={p_ema} BB={p_bb}")
 
-    # STRONG — 4/4
     if c_rsi and c_macd and c_ema and c_bb:
         return "CALL", 10, "STRONG 🔥"
     if p_rsi and p_macd and p_ema and p_bb:
         return "PUT",  10, "STRONG 🔥"
 
-    # GOOD — RSI + MACD + (EMA or BB)
     if c_rsi and c_macd and (c_ema or c_bb):
         return "CALL", 7, "GOOD ✅"
     if p_rsi and p_macd and (p_ema or p_bb):
@@ -152,7 +135,7 @@ def generate_signal(symbol):
     return None, 0, ""
 
 # ============================================================
-#  SCAN LOOP — Har 2 min (AV rate limit respect)
+#  SCAN LOOP — Har 2 min
 # ============================================================
 def scan_loop():
     while True:
@@ -167,7 +150,6 @@ def scan_loop():
             print(f"\n[{stats['last_scan']}] Scanning {len(PAIRS)} pairs...")
             for pair in PAIRS:
                 direction, score, strength = generate_signal(pair)
-                time.sleep(12)  # AV free = 5 req/min
                 if direction:
                     signal_history.appendleft({
                         "time":      ist.strftime("%I:%M %p"),
@@ -183,13 +165,12 @@ def scan_loop():
                 else:
                     print(f"⚪ {pair}: No signal")
 
-            # Fetch prices after scan
             threading.Thread(target=fetch_prices, daemon=True).start()
 
         except Exception as e:
             print(f"Scan error: {e}")
 
-        time.sleep(120)  # 2 min wait
+        time.sleep(120)
 
 @app.route("/signals")
 def get_signals():
@@ -202,10 +183,10 @@ def get_signals():
 
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok", "api": "AlphaVantage"})
+    return jsonify({"status": "ok", "api": "yfinance"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Alpha Vantage")
+    print("🚀 Quotex Signals API — Yahoo Finance (Free!)")
     print("📊 RSI + MACD + EMA/BB")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
     print("⏱  Scan: Every 2 minutes")
