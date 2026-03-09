@@ -16,7 +16,7 @@ winrate        = defaultdict(lambda: {"win": 0, "loss": 0})
 stats          = {"total": 0, "users": 0, "last_scan": "Never"}
 
 # ============================================================
-#  INDICATORS
+#  INDICATORS — Sahi calculation
 # ============================================================
 def calc_ema(closes, period):
     if len(closes) < period: return closes[-1]
@@ -36,9 +36,18 @@ def calc_rsi(closes, period=14):
     return 100 - (100 / (1 + ag/al))
 
 def calc_macd(closes):
-    if len(closes) < 26: return 0, 0
-    ml = calc_ema(closes, 12) - calc_ema(closes, 26)
-    return ml, ml * 0.85
+    """Sahi MACD — EMA12, EMA26, Signal=EMA9 of MACD"""
+    if len(closes) < 35: return 0, 0
+    # MACD line = EMA12 - EMA26
+    macd_values = []
+    for i in range(26, len(closes)):
+        e12 = calc_ema(closes[:i+1], 12)
+        e26 = calc_ema(closes[:i+1], 26)
+        macd_values.append(e12 - e26)
+    if len(macd_values) < 9: return 0, 0
+    # Signal line = EMA9 of MACD
+    signal = calc_ema(macd_values, 9)
+    return macd_values[-1], signal
 
 def calc_bollinger(closes, period=20):
     if len(closes) < period: return None, None, None
@@ -46,7 +55,7 @@ def calc_bollinger(closes, period=20):
     std = (sum((x-m)**2 for x in r)/period)**0.5
     return m + 2*std, m, m - 2*std
 
-def get_candles(symbol, interval="5min", size=60):
+def get_candles(symbol, interval="5min", size=80):
     clean = symbol.replace("/", "")
     url = f"https://api.twelvedata.com/time_series?symbol={clean}&interval={interval}&outputsize={size}&apikey={TD_API_KEY}"
     try:
@@ -69,20 +78,12 @@ def is_good_session():
     return (7 <= hour < 16) or (12 <= hour < 21)
 
 # ============================================================
-#  BEST SIGNAL LOGIC
-#
-#  STRONG signal (score 10) — Sabse reliable:
-#    RSI + MACD + EMA + BB — sab 4 agree
-#
-#  NORMAL signal (score 7) — Acha signal:
-#    RSI + MACD + EMA — 3 agree
-#
-#  WEAK signal (score 5) — Skip karo:
-#    Sirf 2 agree — signal nahi dega
+#  SIGNAL LOGIC
+#  RSI + MACD (core) + EMA ya BB (confirm)
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
-    if not closes or len(closes) < 30: return None, 0, ""
+    if not closes or len(closes) < 35: return None, 0, ""
 
     price  = closes[-1]
     rsi    = calc_rsi(closes)
@@ -91,45 +92,35 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    # --- Individual checks ---
-    # CALL
+    # Debug print
+    print(f"  {symbol}: RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} EMA9={ema9:.5f} EMA21={ema21:.5f}")
+
+    # CALL conditions
     c_rsi  = rsi < 50
     c_macd = ml > ms
     c_ema  = price > ema9 > ema21
     c_bb   = bl is not None and price < bl
 
-    # PUT
+    # PUT conditions
     p_rsi  = rsi > 50
     p_macd = ml < ms
     p_ema  = price < ema9 < ema21
     p_bb   = bu is not None and price > bu
 
-    call_count = sum([c_rsi, c_macd, c_ema, c_bb])
-    put_count  = sum([p_rsi, p_macd, p_ema, p_bb])
-
-    # STRONG — sab 4 agree
-    if call_count == 4:
+    # STRONG — sab 4
+    if c_rsi and c_macd and c_ema and c_bb:
         return "CALL", 10, "STRONG 🔥"
-    if put_count == 4:
+    if p_rsi and p_macd and p_ema and p_bb:
         return "PUT", 10, "STRONG 🔥"
 
-    # NORMAL — RSI + MACD + EMA (3 core)
-    if c_rsi and c_macd and c_ema:
+    # GOOD — RSI + MACD + (EMA ya BB)
+    if c_rsi and c_macd and (c_ema or c_bb):
         return "CALL", 7, "GOOD ✅"
-    if p_rsi and p_macd and p_ema:
-        return "PUT", 7, "GOOD ✅"
-
-    # NORMAL — RSI + MACD + BB
-    if c_rsi and c_macd and c_bb:
-        return "CALL", 7, "GOOD ✅"
-    if p_rsi and p_macd and p_bb:
+    if p_rsi and p_macd and (p_ema or p_bb):
         return "PUT", 7, "GOOD ✅"
 
     return None, 0, ""
 
-# ============================================================
-#  SCAN LOOP — Har 1 min
-# ============================================================
 def scan_loop():
     while True:
         try:
@@ -164,9 +155,6 @@ def scan_loop():
 
         time.sleep(60)
 
-# ============================================================
-#  API ROUTES
-# ============================================================
 @app.route("/signals")
 def get_signals():
     return jsonify({
@@ -178,12 +166,11 @@ def get_signals():
 
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok", "scan": "1min"})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Best System")
-    print("🔥 STRONG: RSI+MACD+EMA+BB (score 10)")
-    print("✅ GOOD:   RSI+MACD+EMA or BB (score 7)")
+    print("🚀 Quotex Signals API — Fixed MACD")
+    print("📊 RSI + MACD(fixed) + EMA/BB")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
     print("⏱  Scan: Every 1 minute")
     threading.Thread(target=scan_loop, daemon=True).start()
