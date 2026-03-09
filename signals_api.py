@@ -8,15 +8,10 @@ app = Flask(__name__)
 CORS(app)
 
 PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "EUR/GBP", "USD/CHF"]
-
-# Yahoo Finance format
 YF_MAP = {
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "USD/JPY": "USDJPY=X",
-    "AUD/USD": "AUDUSD=X",
-    "EUR/GBP": "EURGBP=X",
-    "USD/CHF": "USDCHF=X",
+    "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X", "AUD/USD": "AUDUSD=X",
+    "EUR/GBP": "EURGBP=X", "USD/CHF": "USDCHF=X",
 }
 
 signal_history = deque(maxlen=20)
@@ -60,17 +55,11 @@ def calc_bollinger(closes, period=20):
     std = (sum((x-m)**2 for x in r)/period)**0.5
     return m + 2*std, m, m - 2*std
 
-# ============================================================
-#  YAHOO FINANCE — Free, No API Key!
-# ============================================================
 def get_candles(symbol):
     try:
         import yfinance as yf
-        ticker = yf.Ticker(YF_MAP[symbol])
-        df = ticker.history(period="2d", interval="5m")
-        if df.empty:
-            print(f"  ⚠️ {symbol}: No data from Yahoo")
-            return None
+        df = yf.Ticker(YF_MAP[symbol]).history(period="2d", interval="5m")
+        if df.empty: return None
         closes = list(df["Close"].dropna())
         print(f"  📊 {symbol}: {len(closes)} candles")
         return closes
@@ -82,8 +71,7 @@ def fetch_prices():
     try:
         import yfinance as yf
         for pair in PAIRS:
-            ticker = yf.Ticker(YF_MAP[pair])
-            df = ticker.history(period="1d", interval="1m")
+            df = yf.Ticker(YF_MAP[pair]).history(period="1d", interval="1m")
             if not df.empty:
                 live_prices[pair] = float(df["Close"].iloc[-1])
     except: pass
@@ -93,12 +81,12 @@ def is_good_session():
     return (7 <= hour < 16) or (12 <= hour < 21)
 
 # ============================================================
-#  SIGNAL LOGIC
+#  SIGNAL LOGIC — Voting System (3/4 wins)
+#  Koi bhi 3 indicators agree karein = Signal!
 # ============================================================
 def generate_signal(symbol):
     closes = get_candles(symbol)
-    if not closes or len(closes) < 30:
-        return None, 0, ""
+    if not closes or len(closes) < 30: return None, 0, ""
 
     price  = closes[-1]
     rsi    = calc_rsi(closes)
@@ -107,35 +95,40 @@ def generate_signal(symbol):
     ema21  = calc_ema(closes, 21)
     bu, _, bl = calc_bollinger(closes)
 
-    print(f"  RSI={rsi:.1f} MACD={ml:.6f} Sig={ms:.6f} Price={price:.5f}")
+    print(f"  RSI={rsi:.1f} MACD_line={ml:.6f} MACD_sig={ms:.6f}")
 
-    c_rsi  = rsi < 50
-    c_macd = ml > ms
-    c_ema  = price > ema9 > ema21
-    c_bb   = bl is not None and price < bl
+    # CALL votes
+    call_votes = 0
+    if rsi < 45:                          call_votes += 1  # RSI oversold
+    if ml > ms:                           call_votes += 1  # MACD bullish
+    if price > ema9 > ema21:              call_votes += 1  # EMA bullish
+    if bl is not None and price < bl:     call_votes += 1  # BB lower
 
-    p_rsi  = rsi > 50
-    p_macd = ml < ms
-    p_ema  = price < ema9 < ema21
-    p_bb   = bu is not None and price > bu
+    # PUT votes
+    put_votes = 0
+    if rsi > 55:                          put_votes += 1   # RSI overbought
+    if ml < ms:                           put_votes += 1   # MACD bearish
+    if price < ema9 < ema21:              put_votes += 1   # EMA bearish
+    if bu is not None and price > bu:     put_votes += 1   # BB upper
 
-    print(f"  CALL: RSI={c_rsi} MACD={c_macd} EMA={c_ema} BB={c_bb}")
-    print(f"  PUT:  RSI={p_rsi} MACD={p_macd} EMA={p_ema} BB={p_bb}")
+    print(f"  CALL votes: {call_votes}/4 | PUT votes: {put_votes}/4")
 
-    if c_rsi and c_macd and c_ema and c_bb:
+    # 4/4 = STRONG
+    if call_votes == 4:
         return "CALL", 10, "STRONG 🔥"
-    if p_rsi and p_macd and p_ema and p_bb:
+    if put_votes == 4:
         return "PUT",  10, "STRONG 🔥"
 
-    if c_rsi and c_macd and (c_ema or c_bb):
+    # 3/4 = GOOD
+    if call_votes == 3 and call_votes > put_votes:
         return "CALL", 7, "GOOD ✅"
-    if p_rsi and p_macd and (p_ema or p_bb):
+    if put_votes == 3 and put_votes > call_votes:
         return "PUT",  7, "GOOD ✅"
 
     return None, 0, ""
 
 # ============================================================
-#  SCAN LOOP — Har 2 min
+#  SCAN LOOP
 # ============================================================
 def scan_loop():
     while True:
@@ -186,8 +179,8 @@ def ping():
     return jsonify({"status": "ok", "api": "yfinance"})
 
 if __name__ == "__main__":
-    print("🚀 Quotex Signals API — Yahoo Finance (Free!)")
-    print("📊 RSI + MACD + EMA/BB")
+    print("🚀 Quotex Signals API — Voting System")
+    print("📊 RSI + MACD + EMA + BB (3/4 = Signal)")
     print(f"📡 Pairs: {', '.join(PAIRS)}")
     print("⏱  Scan: Every 2 minutes")
     threading.Thread(target=scan_loop, daemon=True).start()
