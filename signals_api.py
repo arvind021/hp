@@ -323,31 +323,40 @@ def train_model(pair, closes):
 # ============================================================
 #  DATA FETCH
 # ============================================================
+def _get_close_series(df, sym):
+    """yfinance new version MultiIndex fix"""
+    import pandas as pd
+    if isinstance(df.columns, pd.MultiIndex):
+        return df[("Close", sym)].dropna()
+    return df["Close"].dropna()
+
 def get_candles(symbol):
     import yfinance as yf
-    for cfg in [("5d","2m"), ("2d","2m"), ("7d","5m")]:
-        for attempt in range(2):
-            try:
-                df = yf.download(YF_MAP[symbol], period=cfg[0], interval=cfg[1],
-                                 progress=False, timeout=20)
-                if df is not None and len(df) >= 35:
-                    closes = [float(x) for x in df["Close"].dropna()]
+    sym = YF_MAP[symbol]
+    for attempt in range(3):
+        try:
+            df = yf.download(sym, period="5d", interval="2m",
+                             progress=False, timeout=20)
+            if df is not None and len(df) >= 35:
+                closes = [float(x) for x in _get_close_series(df, sym)]
+                if len(closes) >= 35:
                     print(f"  ✅ {symbol}: {len(closes)} candles")
                     return closes
-            except Exception as e:
-                print(f"  ⚠️ {symbol} {cfg} attempt {attempt+1}: {e}")
-                time.sleep(1)
+        except Exception as e:
+            print(f"  ⚠️ {symbol} attempt {attempt+1}: {e}")
+            time.sleep(1)
     print(f"  ❌ {symbol}: Failed")
     return None
 
 def get_current_price(symbol):
     import yfinance as yf
+    sym = YF_MAP[symbol]
     for attempt in range(3):
         try:
-            df = yf.download(YF_MAP[symbol], period="1d", interval="1m",
+            df = yf.download(sym, period="1d", interval="2m",
                             progress=False, timeout=10)
             if df is not None and len(df) > 0:
-                return float(df["Close"].iloc[-1])
+                return float(_get_close_series(df, sym).iloc[-1])
         except Exception as e:
             print(f"  ⚠️ Price {symbol}: {e}")
             time.sleep(1)
@@ -355,20 +364,14 @@ def get_current_price(symbol):
 
 def fetch_all_prices():
     import yfinance as yf
-    try:
-        symbols = " ".join(YF_MAP.values())
-        df = yf.download(symbols, period="1d", interval="1m",
-                        progress=False, timeout=15, group_by="ticker")
-        for pair, sym in YF_MAP.items():
-            try:
-                price = float(df[sym]["Close"].dropna().iloc[-1])
-                live_prices[pair] = price
-            except: pass
-    except Exception as e:
-        print(f"Price fetch error: {e}")
-        for pair in PAIRS:
-            p = get_current_price(pair)
-            if p: live_prices[pair] = p
+    for pair in PAIRS:
+        try:
+            sym = YF_MAP[pair]
+            df = yf.download(sym, period="1d", interval="2m",
+                            progress=False, timeout=10)
+            if df is not None and len(df) > 0:
+                live_prices[pair] = float(_get_close_series(df, sym).iloc[-1])
+        except: pass
 
 def is_good_session():
     hour = datetime.now(pytz.timezone("UTC")).hour
