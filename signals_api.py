@@ -84,11 +84,17 @@ def tg_send_file(filepath, caption=""):
                 files={"document": f},
                 timeout=30
             )
-        if r.status_code == 200:
+        resp = r.json()
+        if r.status_code == 200 and resp.get("ok"):
             print(f"  📤 Uploaded: {os.path.basename(filepath)}")
-            return r.json()["result"]["document"]["file_id"]
+            return resp["result"]["document"]["file_id"]
+        else:
+            print(f"  ❌ Upload failed: {resp.get('description', 'Unknown error')}")
+            # Text message bhejo instead
+            tg_log(f"⚠️ File upload failed: {os.path.basename(filepath)}\n{caption}")
     except Exception as e:
         print(f"  ❌ Upload error: {e}")
+        tg_log(f"⚠️ Upload error: {e}")
     return None
 
 def tg_download_model(pair):
