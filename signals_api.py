@@ -324,35 +324,51 @@ def train_model(pair, closes):
 #  DATA FETCH
 # ============================================================
 def get_candles(symbol):
-    try:
-        import yfinance as yf
-        df = yf.Ticker(YF_MAP[symbol]).history(period="5d", interval="2m")
-        if df.empty:
-            return None
-        return list(df["Close"].dropna())
-    except Exception as e:
-        print(f"  ❌ {symbol}: {e}")
-        return None
+    import yfinance as yf
+    for cfg in [("5d","2m"), ("2d","2m"), ("7d","5m")]:
+        for attempt in range(2):
+            try:
+                df = yf.download(YF_MAP[symbol], period=cfg[0], interval=cfg[1],
+                                 progress=False, timeout=20)
+                if df is not None and len(df) >= 35:
+                    closes = [float(x) for x in df["Close"].dropna()]
+                    print(f"  ✅ {symbol}: {len(closes)} candles")
+                    return closes
+            except Exception as e:
+                print(f"  ⚠️ {symbol} {cfg} attempt {attempt+1}: {e}")
+                time.sleep(1)
+    print(f"  ❌ {symbol}: Failed")
+    return None
 
 def get_current_price(symbol):
-    try:
-        import yfinance as yf
-        df = yf.Ticker(YF_MAP[symbol]).history(period="1d", interval="1m")
-        if not df.empty:
-            return float(df["Close"].iloc[-1])
-    except:
-        pass
+    import yfinance as yf
+    for attempt in range(3):
+        try:
+            df = yf.download(YF_MAP[symbol], period="1d", interval="1m",
+                            progress=False, timeout=10)
+            if df is not None and len(df) > 0:
+                return float(df["Close"].iloc[-1])
+        except Exception as e:
+            print(f"  ⚠️ Price {symbol}: {e}")
+            time.sleep(1)
     return None
 
 def fetch_all_prices():
+    import yfinance as yf
     try:
-        import yfinance as yf
+        symbols = " ".join(YF_MAP.values())
+        df = yf.download(symbols, period="1d", interval="1m",
+                        progress=False, timeout=15, group_by="ticker")
+        for pair, sym in YF_MAP.items():
+            try:
+                price = float(df[sym]["Close"].dropna().iloc[-1])
+                live_prices[pair] = price
+            except: pass
+    except Exception as e:
+        print(f"Price fetch error: {e}")
         for pair in PAIRS:
-            df = yf.Ticker(YF_MAP[pair]).history(period="1d", interval="1m")
-            if not df.empty:
-                live_prices[pair] = float(df["Close"].iloc[-1])
-    except:
-        pass
+            p = get_current_price(pair)
+            if p: live_prices[pair] = p
 
 def is_good_session():
     hour = datetime.now(pytz.timezone("UTC")).hour
