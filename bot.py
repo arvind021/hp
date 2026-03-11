@@ -137,8 +137,15 @@ def tg_download_model(pair):
         return False
 
 def backup_to_telegram():
+    # trade_data.json backup
     if os.path.exists(DATA_FILE):
-        tg_send_file(DATA_FILE, f"💾 Backup | W:{stats['wins']} L:{stats['losses']}")
+        tg_send_file(DATA_FILE, f"💾 trade_data | W:{stats['wins']} L:{stats['losses']}")
+        print("  📤 trade_data.json backed up")
+
+    # feedback_data.json backup
+    if os.path.exists(FEEDBACK_FILE):
+        tg_send_file(FEEDBACK_FILE, f"🧠 feedback_data | {len(feedback_data)} samples")
+        print("  📤 feedback_data.json backed up")
 
 # ============================================================
 #  INDICATORS
@@ -495,8 +502,49 @@ def retrain_loop():
 # ============================================================
 #  INITIAL SETUP
 # ============================================================
+def restore_json_from_telegram(filename, savepath):
+    """Telegram se JSON file download karo"""
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+            params={"limit": 100}, timeout=15
+        )
+        if r.status_code != 200:
+            return False
+        file_id = None
+        for msg in reversed(r.json().get("result", [])):
+            doc = msg.get("document", {}) or msg.get("channel_post", {}).get("document", {})
+            if doc.get("file_name") == filename:
+                file_id = doc["file_id"]
+                break
+        if not file_id:
+            return False
+        r2 = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                         params={"file_id": file_id}, timeout=15)
+        fp = r2.json()["result"]["file_path"]
+        r3 = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}", timeout=30)
+        with open(savepath, "wb") as f:
+            f.write(r3.content)
+        print(f"  📥 Restored: {filename}")
+        return True
+    except Exception as e:
+        print(f"  ❌ Restore error {filename}: {e}")
+        return False
+
 def initial_setup():
     tg_log("🚀 QX Signals starting...\nChecking saved models...")
+
+    # JSON files restore karo Telegram se
+    if not os.path.exists(DATA_FILE):
+        print("\n📥 Restoring trade_data.json from Telegram...")
+        restore_json_from_telegram("trade_data.json", DATA_FILE)
+
+    if not os.path.exists(FEEDBACK_FILE):
+        print("\n📥 Restoring feedback_data.json from Telegram...")
+        if restore_json_from_telegram("feedback_data.json", FEEDBACK_FILE):
+            global feedback_data
+            feedback_data = load_feedback()
+            print(f"  🧠 Feedback restored: {len(feedback_data)} samples")
 
     for pair in PAIRS:
         print(f"\n📊 {pair}:")
